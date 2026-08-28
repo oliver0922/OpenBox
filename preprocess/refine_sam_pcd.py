@@ -88,8 +88,8 @@ def match_segment_instances(args, segment_list, instance_pcd_list, instance_pcd_
         for i_id, instance_pcd in zip(instance_pcd_id_list, instance_pcd_list):
             tree = scipy.spatial.cKDTree(instance_pcd)
             D, I = tree.query(segment)
-            seg_in_inst = np.sum(D < 0.1)
-            if seg_in_inst / len(segment) > 0.3 and seg_in_inst / len(instance_pcd) > 0.2:
+            seg_in_inst = np.sum(D < args.match_dist)
+            if seg_in_inst / len(segment) > args.seg_overlap and seg_in_inst / len(instance_pcd) > args.inst_overlap:
                 segment_id_list.append(i_id)
                 break
         if len(segment_id_list) <= s_id:
@@ -114,10 +114,12 @@ def merge_segments_with_id(args, segment_id_list, segment_list):
 
 def hdbscan_areas(args, pc):
     hdbscaner = HDBSCAN(algorithm='best', alpha=1., approx_min_span_tree=True,
-                                                gen_min_span_tree=True, leaf_size=100,
-                                                metric='euclidean', min_cluster_size=15, min_samples=10, cluster_selection_method='eom')
+                        gen_min_span_tree=True, leaf_size=100, metric='euclidean',
+                        min_cluster_size=args.min_cluster_size,
+                        min_samples=args.min_samples,
+                        cluster_selection_method='eom')
     cluster_idx = hdbscaner.fit_predict(pc)
-    outlier_mask = hdbscaner.outlier_scores_ > 0.5
+    outlier_mask = hdbscaner.outlier_scores_ > args.outlier_threshold
     cluster_idx = cluster_idx[~outlier_mask]
     pc = pc[~outlier_mask]
     cluster_list = []
@@ -204,10 +206,22 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=1,
                         help='number of scene-level worker processes')
 
-    parser.add_argument('--min_segment_pc_size', type=float, default=15)
-
-    parser.add_argument('--match_threshold', type=float, default=0.7)
-    parser.add_argument('--z_threshold', type=float, default=0)
+    parser.add_argument('--min_segment_pc_size', type=int, default=15,
+                        help='drop HDBSCAN clusters with fewer points than this')
+    parser.add_argument('--min_cluster_size', type=int, default=15,
+                        help='HDBSCAN min_cluster_size')
+    parser.add_argument('--min_samples', type=int, default=10,
+                        help='HDBSCAN min_samples')
+    parser.add_argument('--outlier_threshold', type=float, default=0.5,
+                        help='drop points with HDBSCAN outlier score above this')
+    parser.add_argument('--match_dist', type=float, default=0.1,
+                        help='nearest-neighbour distance (m) that counts a cluster point as inside an instance')
+    parser.add_argument('--seg_overlap', type=float, default=0.3,
+                        help='min fraction of a cluster covered by an instance to accept the match')
+    parser.add_argument('--inst_overlap', type=float, default=0.2,
+                        help='min fraction of the instance covered by the cluster to accept the match')
+    parser.add_argument('--z_threshold', type=float, default=0,
+                        help='drop points at or below this height after ground removal')
 
     parser.add_argument('--aug_name', type=str, default='adaptive1200_30_50_10_2',
                         help='mask variant to refine: no_aug or adaptive1200_30_50_10_2')
