@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Build artifacts
+build/
+dist/
+*.so
+
+# Model checkpoints — too large for git, transferred separately
+Grounded-SAM-2/checkpoints/*
+!Grounded-SAM-2/checkpoints/README.md
+Grounded-SAM-2/parent_files/work_dirs/
+
+# Generated pipeline outputs
+*.npy
+*.bin
+*.pkl
+!data/waymo/ImageSets/*.txt
+
+# Internal notes / editor settings — never publish
+VERIFICATION.md
+.vscode/

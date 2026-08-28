@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.so
+checkpoints/*.pt
+parent_files/work_dirs/
+*.egg-info/
