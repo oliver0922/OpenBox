@@ -22,10 +22,6 @@
   </p>
 </p>
 
-## Demo
-
-https://github.com/oliver0922/OpenBox/raw/main/demo.mp4
-
 OpenBox is a **two-stage automatic annotation pipeline** that produces
 high-quality 3D bounding boxes for LiDAR scenes **without any 3D labels or
 self-training iterations**, by leveraging 2D vision foundation models:
