@@ -60,9 +60,13 @@ single script with explicit input/output roots.
 
 ## Adaptive Bounding Box Generation
 
-Stage 2 (instance categorization, SDF-based surface-aware filtering, and
-visibility-based box extension) is not part of this repository yet; it will be
-released together with the full codebase.
+**[→ boxgen/README.md](boxgen/README.md)**
+
+Turns the cross-modal instance point clouds into per-frame 3-D pseudo labels in
+three steps: per-scene box generation (instance categorization, SDF-based
+surface-aware filtering, visibility-based box extension), conversion to
+per-frame OpenPCDet infos, and multi-object tracking. Each step is a single
+script with explicit input/output roots.
 
 ## BibTeX
 
@@ -84,6 +88,9 @@ OpenBox builds on
 [Patchwork++](https://github.com/url-kaist/patchwork-plusplus),
 [HDBSCAN](https://github.com/scikit-learn-contrib/hdbscan),
 [VDBFusion](https://github.com/PRBonn/vdbfusion),
-[OpenPCDet](https://github.com/open-mmlab/OpenPCDet), and
+[OpenPCDet](https://github.com/open-mmlab/OpenPCDet),
+[AB3DMOT](https://github.com/xinshuoweng/AB3DMOT) (the stage-3 tracker in
+`boxgen/openbox_boxgen/tracking/` is derived from it and carries its
+non-commercial research licence), and
 [CPD](https://github.com/hailanyi/CPD). We thank the authors of these
 projects.

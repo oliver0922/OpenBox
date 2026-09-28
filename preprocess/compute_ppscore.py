@@ -36,6 +36,11 @@ from tqdm import tqdm
 
 
 def count_neighbors(points, trees, max_neighbor_dist):
+    """Count neighbors of each point in every window tree.
+
+    points: float32 (N, >=3) xyz; trees: list of W cKDTree; max_neighbor_dist:
+    float radius (m) -> int (N, W) neighbor counts per point per window.
+    """
     counts = [
         tree.query_ball_point(points[:, :3], r=max_neighbor_dist, return_length=True)
         for tree in trees
@@ -44,18 +49,34 @@ def count_neighbors(points, trees, max_neighbor_dist):
 
 
 def compute_ephe_score(count):
+    """Normalized entropy of per-window neighbor counts.
+
+    count: int (N, W) -> float64 (N,) entropy H in [0, 1]; high H means the
+    point is seen in all windows (static).
+    """
     num_windows = count.shape[1]
     P = count / (np.expand_dims(count.sum(axis=1), -1) + 1e-8)
     return (-P * np.log(P + 1e-8)).sum(axis=1) / np.log(num_windows)
 
 
 def compute_ppscore(cur_frame, neighbor_traversals, max_neighbor_dist):
+    """PP-score of one frame against its temporal windows.
+
+    cur_frame: float32 (N, 3) frame-i xyz; neighbor_traversals: list of W
+    float32 (M_j, 3) clouds in frame-i coords; max_neighbor_dist: float (m)
+    -> float64 (N,) normalized entropy per point.
+    """
     trees = [cKDTree(points) for points in neighbor_traversals]
     count = count_neighbors(cur_frame, trees, max_neighbor_dist)
     return compute_ephe_score(count)
 
 
 def points_rigid_transform(cloud, pose):
+    """Apply a 4x4 rigid transform to points.
+
+    cloud: (N, >=3) xyz (extra columns ignored); pose: (4, 4) homogeneous
+    matrix -> float32 (N, 3) transformed xyz (empty input returned as is).
+    """
     if cloud.shape[0] == 0:
         return cloud
     mat = np.ones(shape=(cloud.shape[0], 4), dtype=np.float32)
@@ -70,7 +91,13 @@ def points_rigid_transform(cloud, pose):
 def save_pp_score(
     seq_name, root_path, out_root, max_win=30, win_inte=5, max_neighbor_dist=0.3
 ):
-    """Write ppscore .npy files for one sequence; returns the sequence name."""
+    """Write ppscore .npy files for one sequence; returns the sequence name.
+
+    seq_name: str segment name; root_path: str processed-data root; out_root:
+    str output root; max_win/win_inte: int window extent/stride (frames);
+    max_neighbor_dist: float radius (m) -> str seq_name. Writes float16 (N,)
+    <out_root>/<seq>/ppscore/NNNN.npy per frame.
+    """
     out_dir = os.path.join(out_root, seq_name, "ppscore")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -105,6 +132,7 @@ def save_pp_score(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser -> argparse.ArgumentParser."""
     parser = argparse.ArgumentParser(
         description="Compute PP-scores for Waymo sequences.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -141,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """CLI entry point: fan sequences out over a spawn Pool of workers."""
     args = build_parser().parse_args()
     with args.split_file.open("r") as stream:
         segment_names = [line.strip().split(".")[0] for line in stream if line.strip()]

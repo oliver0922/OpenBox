@@ -15,6 +15,7 @@ Usage:
         --data_root $OUT/sam --augname adaptive1200_30_50_10_2 \
         --scene-start 0 --scene-end 797 --num_workers 32
 """
+import json
 import os
 import argparse
 import functools
@@ -29,7 +30,10 @@ CAM_LIST = ['SIDE_LEFT', 'FRONT_LEFT', 'FRONT', 'FRONT_RIGHT', 'SIDE_RIGHT']
 
 
 def sam_frame_path(data_path, cam, augname, dir_name, frame_idx):
-    """Path to a per-camera SAM result file; 'no_aug' results live outside the aug subdir."""
+    """Path to a per-camera SAM result file; 'no_aug' results live outside the aug subdir.
+
+    data_path/cam/augname/dir_name: str; frame_idx: int -> str file path.
+    """
     if augname == 'no_aug':
         return os.path.join(data_path, cam, 'visualization', dir_name, f'{frame_idx:06d}.bin')
     return os.path.join(data_path, cam, augname, 'visualization', dir_name, f'{frame_idx:06d}.bin')
@@ -44,7 +48,10 @@ def load_bin(path, num_cols):
 
 
 def count_shared_points(points_a, points_b):
-    """Number of exactly-duplicated points between two point sets."""
+    """Number of exactly-duplicated points between two point sets.
+
+    points_a: float32 (A, 3) xyz; points_b: float32 (B, 3) xyz -> int count.
+    """
     merged = o3d.geometry.PointCloud()
     merged.points = o3d.utility.Vector3dVector(np.concatenate([points_a, points_b], axis=0))
     deduped = merged.remove_duplicated_points()
@@ -52,7 +59,10 @@ def count_shared_points(points_a, points_b):
 
 
 def resolve_id(cluster_id, conn_dict):
-    """Follow child -> parent links to the final merged instance id."""
+    """Follow child -> parent links to the final merged instance id.
+
+    cluster_id: int id; conn_dict: {int: int} child -> parent -> int final id.
+    """
     while cluster_id in conn_dict:
         cluster_id = conn_dict[cluster_id]
     return cluster_id
@@ -61,8 +71,11 @@ def resolve_id(cluster_id, conn_dict):
 def find_connected_instances(data_path, augname, frame_range, overlap_threshold):
     """Pass 1: link instance ids that overlap in 3D across cameras.
 
-    Returns (conn_dict, color_dict): conn_dict maps larger id -> smaller id for
-    each overlapping pair; color_dict keeps one representative color per id.
+    data_path: str scene dir; augname: str mask variant; frame_range: iterable
+    of int; overlap_threshold: int shared-point count.
+    Returns (conn_dict, color_dict): conn_dict {int: int} maps larger id ->
+    smaller id for each overlapping pair; color_dict {int: float32 (3,) rgb}
+    keeps one representative color per id.
     """
     conn_dict = {}
     color_dict = {}
@@ -92,7 +105,12 @@ def find_connected_instances(data_path, augname, frame_range, overlap_threshold)
 
 
 def save_merged_frames(data_path, augname, frame_range, conn_dict, color_dict):
-    """Pass 2: rewrite per-camera point clouds with merged ids into single per-frame files."""
+    """Pass 2: rewrite per-camera point clouds with merged ids into single per-frame files.
+
+    data_path: str scene dir; augname: str; frame_range: iterable of int;
+    conn_dict: {int: int}; color_dict: {int: float32 (3,) rgb} -> None. Writes
+    float32 (M, 4) x,y,z,id and float32 (M, 3) rgb .bin files per frame.
+    """
     pc_out_dir = os.path.join(data_path, 'merged_sam_pc', augname)
     color_out_dir = os.path.join(data_path, 'merged_sam_color', augname)
     os.makedirs(pc_out_dir, exist_ok=True)
@@ -123,7 +141,55 @@ def save_merged_frames(data_path, augname, frame_range, conn_dict, color_dict):
         np.concatenate(color_chunks).tofile(os.path.join(color_out_dir, f'{frame_idx:06d}.bin'))
 
 
+CAM_ORDER = ['FRONT', 'FRONT_LEFT', 'FRONT_RIGHT', 'SIDE_LEFT', 'SIDE_RIGHT']
+
+
+def save_agg_mask(data_path, conn_dict, frame_range) -> None:
+    """Aggregate the per-camera 2D detections into one ``agg_mask.json`` per scene.
+
+    Reads each camera's step-2 ``erosion/json_data/mask_NNNNNN.json``
+    (``labels: {instance_id: {class_name, x1, y1, x2, y2, ...}}``) and writes
+    ``agg_mask.json``: ``{frame_idx: {merged_instance_id: [{cam_loc: str,
+    class_name: str, bbox: [x1, y1, x2, y2]}, ...]}}`` (all int pixel coords).
+    Instance ids are remapped through ``conn_dict`` by a SINGLE lookup step,
+    exactly like the run that produced the released files (not the chained
+    ``resolve_id`` used for the point clouds).  Frames where no camera has a
+    json are skipped.  Box generation reads this file for the 2D IoU vote.
+
+    data_path: str scene dir; conn_dict: {int: int}; frame_range: iterable of
+    int -> None.
+    """
+    mask_per_scene = {}
+    for frame_idx in frame_range:
+        mask_per_frame = {}
+        for cam_loc in CAM_ORDER:
+            mask_path = os.path.join(data_path, cam_loc, 'erosion', 'json_data',
+                                     f'mask_{frame_idx:06d}.json')
+            if not os.path.exists(mask_path):
+                continue
+            with open(mask_path) as json_file:
+                labels = json.load(json_file)['labels']
+            for instance_id, info in labels.items():
+                entry = {'cam_loc': cam_loc, 'class_name': info['class_name'],
+                         'bbox': [info['x1'], info['y1'], info['x2'], info['y2']]}
+                if int(instance_id) in conn_dict:
+                    merged_id = str(conn_dict[int(instance_id)])
+                    mask_per_frame.setdefault(merged_id, []).append(entry)
+                else:
+                    # unmapped ids REPLACE any existing list -- kept exactly as the
+                    # run that produced the released agg_mask.json behaved
+                    mask_per_frame[str(instance_id)] = [entry]
+        if mask_per_frame:
+            mask_per_scene[frame_idx] = mask_per_frame
+    with open(os.path.join(data_path, 'agg_mask.json'), 'w') as json_save_file:
+        json.dump(mask_per_scene, json_save_file)
+
+
 def merge_instances(scene_idx, args):
+    """Run both passes for one scene and dump conn_dict (+ agg_mask for adaptive).
+
+    scene_idx: int scene number; args: parsed CLI namespace -> None.
+    """
     data_path = os.path.join(args.data_root, f'scene-{scene_idx}')
     frame_range = range(args.num_frames)
 
@@ -132,10 +198,14 @@ def merge_instances(scene_idx, args):
 
     with open(os.path.join(data_path, f'conn_dict_{args.augname}.pkl'), 'wb') as f:
         pickle.dump(conn_dict, f)
+    if args.augname == 'adaptive1200_30_50_10_2':
+        # the 2D-box aggregate is defined on the adaptive-mask merge only
+        save_agg_mask(data_path, conn_dict, frame_range)
     print("scene_idx: ", scene_idx, "done")
 
 
 def main(args):
+    """Map merge_instances over the scene range with a worker pool. args: parsed CLI namespace -> None."""
     worker = functools.partial(merge_instances, args=args)
     pool = multiprocessing.Pool(processes=args.num_workers)
     pool.map(worker, range(args.scene_start, args.scene_end + 1))

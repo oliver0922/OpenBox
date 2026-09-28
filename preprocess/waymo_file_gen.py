@@ -32,6 +32,7 @@ SECOND_PROJECTION_CAMERA_COLUMN = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser -> argparse.ArgumentParser."""
     parser = argparse.ArgumentParser(
         description="Convert Waymo TFRecords into the per-scene directory layout ($OUT/scenes).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -83,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def configure_gpu_worker(gpu_index: int) -> None:
+    """Pool initializer: restrict TF in this worker to GPU #gpu_index (int) -> None."""
     gpus = tf.config.list_physical_devices("GPU")
     gpu = gpus[gpu_index]
     tf.config.set_visible_devices(gpu, "GPU")
@@ -90,10 +92,12 @@ def configure_gpu_worker(gpu_index: int) -> None:
 
 
 def configure_cpu_worker(_worker_index: int) -> None:
+    """Pool initializer: hide all GPUs from TF in this worker (_worker_index: int, unused) -> None."""
     tf.config.set_visible_devices([], "GPU")
 
 
 def resolve_paths(args: argparse.Namespace):
+    """Expand CLI paths -> (waymo_root, split_file, records_dir, output_root), all pathlib.Path."""
     waymo_root = args.waymo_root.expanduser().resolve()
     split_file = waymo_root / "ImageSets" / "train.txt"
     records_dir = waymo_root / "train"
@@ -102,6 +106,7 @@ def resolve_paths(args: argparse.Namespace):
 
 
 def load_record_names(split_file: Path):
+    """Read the split file -> non-empty list of str tfrecord names (one per line)."""
     if not split_file.is_file():
         raise FileNotFoundError(f"Split file does not exist: {split_file}")
 
@@ -114,6 +119,12 @@ def load_record_names(split_file: Path):
 
 
 def extract_point_cloud(frame: dataset_pb2.Frame):
+    """Extract both lidar returns of one frame, all 5 lidars stacked.
+
+    frame: Waymo Frame proto -> (points float32 (N, 3) vehicle-frame xyz,
+    projections int32 (N, 6): cam_id,x,y for the first and second camera each
+    point projects into).
+    """
     parsed = frame_utils.parse_range_image_and_camera_projection(frame)
     if len(parsed) == 4:
         # waymo-open-dataset >= 1.5 also returns segmentation labels
@@ -137,6 +148,11 @@ def extract_point_cloud(frame: dataset_pb2.Frame):
 
 
 def extract_annotations(frame: dataset_pb2.Frame) -> np.ndarray:
+    """Collect the frame's laser labels.
+
+    frame: Waymo Frame proto -> float64 (K, 7) cx,cy,cz,length,width,height,
+    heading; shape (0,) when the frame has no labels.
+    """
     annotations = []
     for label in frame.laser_labels:
         box = label.box
@@ -157,6 +173,11 @@ def extract_annotations(frame: dataset_pb2.Frame) -> np.ndarray:
 def build_output_paths(
     output_root: Path, scene_idx: int, frame_idx: int
 ):
+    """Build every output path for one frame.
+
+    output_root: Path; scene_idx/frame_idx: int -> (core_paths {str: Path},
+    camera_paths {camera_id int: {str: Path}}). Nothing is created on disk.
+    """
     scene_dir = output_root / f"scene-{scene_idx}"
     frame_name = f"{frame_idx:06d}"
     core_paths = {
@@ -172,10 +193,33 @@ def build_output_paths(
             "mask_1": scene_dir / camera_name / "mask_1" / f"{frame_name}.bin",
             "mask_2": scene_dir / camera_name / "mask_2" / f"{frame_name}.bin",
             "image": scene_dir / camera_name / "image" / f"{frame_name}.jpeg",
+            "intrinsic": scene_dir / camera_name / "intrinsic" / f"{frame_name}.bin",
+            "projection_mat": scene_dir / camera_name / "projection_mat" / f"{frame_name}.bin",
         }
         for camera_id, camera_name in CAMERA_NAMES.items()
     }
     return core_paths, camera_paths
+
+
+def save_camera_calibrations(frame, scene_to_frame_pose, camera_paths) -> None:
+    """Write each camera's calibration files for one frame.
+
+    * ``intrinsic/NNNNNN.bin`` — float64 (9,): the Waymo camera intrinsic vector
+      [f_u, f_v, c_u, c_v, k1, k2, p1, p2, k3], copied verbatim from
+      ``frame.context.camera_calibrations``.
+    * ``projection_mat/NNNNNN.bin`` — float64 (4, 4): scene frame (ego pose of
+      frame 0) -> this frame's camera frame, i.e.
+      ``inv(pose_f @ extrinsic) @ pose_0`` where ``extrinsic`` is the camera ->
+      vehicle transform.  ``scene_to_frame_pose`` is the precomputed
+      ``inv(pose_f) @ pose_0`` (float64 (4, 4)).
+    """
+    for calibration in frame.context.camera_calibrations:
+        paths = camera_paths[calibration.name]
+        intrinsic = np.asarray(calibration.intrinsic, dtype=np.float64)
+        intrinsic.tofile(str(paths["intrinsic"]))
+        extrinsic = np.asarray(calibration.extrinsic.transform, dtype=np.float64).reshape(4, 4)
+        projection = np.linalg.inv(extrinsic) @ scene_to_frame_pose
+        projection.tofile(str(paths["projection_mat"]))
 
 
 def save_frame(
@@ -186,6 +230,12 @@ def save_frame(
     core_paths,
     camera_paths,
 ) -> None:
+    """Write one frame's pointcloud/projection/annotations/pose bins plus per-camera masks and jpegs.
+
+    frame: Waymo Frame proto; points: float32 (N, 3); projections: int32
+    (N, 6); annotations: float64 (K, 7); core_paths/camera_paths: dicts from
+    build_output_paths -> None. mask_1/mask_2 are int64 point-index arrays.
+    """
     images_by_camera = {image.name: image.image for image in frame.images}
     missing_cameras = sorted(set(CAMERA_NAMES) - set(images_by_camera))
     if missing_cameras:
@@ -219,6 +269,11 @@ def process_scene(
     record_path: Path,
     output_root: Path,
 ) -> int:
+    """Convert one TFRecord into the scene-N output tree.
+
+    scene_idx: int; record_path: Path to the .tfrecord; output_root: Path
+    -> int number of frames written.
+    """
     dataset = tf.data.TFRecordDataset(str(record_path))
     frame = dataset_pb2.Frame()
     processed_frames = 0
@@ -229,15 +284,20 @@ def process_scene(
         )
 
         frame.ParseFromString(bytes(data.numpy()))
+        pose = np.asarray(frame.pose.transform, dtype=np.float64).reshape(4, 4)
+        if frame_idx == 0:
+            first_frame_pose = pose  # scene frame = ego pose of frame 0
         points, projections = extract_point_cloud(frame)
         annotations = extract_annotations(frame)
         save_frame(frame, points, projections, annotations, core_paths, camera_paths)
+        save_camera_calibrations(frame, np.linalg.inv(pose) @ first_frame_pose, camera_paths)
         processed_frames += 1
 
     return processed_frames
 
 
 def main() -> None:
+    """CLI entry point: validate the scene range and fan scenes out over single-process pools."""
     parser = build_parser()
     args = parser.parse_args()
     waymo_root, split_file, records_dir, output_root = resolve_paths(args)

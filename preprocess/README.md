@@ -7,7 +7,7 @@ point clouds, cross-camera instance point clouds (context-aware refined), and
 a static-background TSDF mesh.
 
 ```
-[0] waymo_processed_gen ──► $OUT/processed   (lidar frames + poses; used by steps 4-6)
+[0] waymo_processed_gen ──► $OUT/processed   (lidar frames, camera-visible subset, poses, fov infos; steps 4-6 + box generation)
 [1] waymo_file_gen ──────► $OUT/scenes      (points / projections / images / masks / poses)
         │
         ├──► [2] gen_multicam_samv2 ──► [3] merge_instances ──► [4] refine_sam_pcd
@@ -105,7 +105,10 @@ zero-padded frame index, `<segment>` = TFRecord name without `.tfrecord`,
 $OUT/
 ├── processed/<segment>/                        # step 0 — OpenPCDet layout
 │   ├── NNNN.npy                                #   float32 (N,6) x,y,z,intensity,elongation,NLZ (vehicle frame)
-│   └── <segment>.pkl                           #   list of {frame_id, pose(float32 4x4)}
+│   ├── masked_points/NNNN.npy                  #   the rows of NNNN.npy that project into a camera image
+│   ├── <segment>.pkl                           #   list of {frame_id, pose(float32 4x4)}
+│   └── <segment>_fov.pkl                       #   per-frame OpenPCDet infos (meta, pose, GT boxes with x>0,
+│                                               #   masked per-lidar counts); box generation copies its frame records
 ├── scenes/scene-N/                             # step 1
 │   ├── pointcloud/NNNNNN.bin                   #   float32 (P,3)
 │   ├── pointcloud_projection/NNNNNN.bin        #   int32 (P,6): (cam,u,v) for up to two cameras
@@ -114,7 +117,9 @@ $OUT/
 │   └── <CAM>/
 │       ├── image/NNNNNN.jpeg                   #   1920x1280 (FRONT*), 1920x886 (SIDE*)
 │       ├── mask_1/NNNNNN.bin                   #   int64 indices of points whose 1st projection is <CAM>
-│       └── mask_2/NNNNNN.bin                   #   int64 indices of points whose 2nd projection is <CAM>
+│       ├── mask_2/NNNNNN.bin                   #   int64 indices of points whose 2nd projection is <CAM>
+│       ├── intrinsic/NNNNNN.bin                #   float64 (9,) waymo camera intrinsic vector
+│       └── projection_mat/NNNNNN.bin           #   float64 (4,4) scene frame -> this frame's camera
 ├── sam/scene-N/                                # steps 2–3
 │   ├── <CAM>/
 │   │   ├── erosion/mask_data/mask_NNNNNN.npy   #   uint16 (H,W) instance masks, 0 = background
@@ -126,7 +131,8 @@ $OUT/
 │   ├── instance_classname_dict.pkl             #   {instance_id: class_name}
 │   ├── merged_sam_pc/<aug>/NNNNNN.bin          # step 3 — float32 (M,4), ids merged across cameras
 │   ├── merged_sam_color/<aug>/NNNNNN.bin       #          float32 (M,3)
-│   └── conn_dict_<aug>.pkl                     #          {instance_id: merged_into_id}
+│   ├── conn_dict_<aug>.pkl                     #          {instance_id: merged_into_id}
+│   └── agg_mask.json                           #          per-frame 2D boxes per merged instance (adaptive run)
 ├── refined/scene-N/refined_sam_pc/<aug>/NNNNNN.bin   # step 4 — float64 (R,4) x,y,z,instance_id
 ├── ppscore/<segment>/ppscore/NNNN.npy          # step 5 — float16 (N,) persistence score per lidar point
 └── mesh/scene-N/                               # step 6
@@ -149,8 +155,16 @@ Scene ranges are inclusive in every step (`--scene-end 797` = all 798 scenes).
 
 Extracts every frame's lidar points in the standard OpenPCDet layout
 (float32 `(N, 6)`: x, y, z, intensity, elongation, NLZ flag) together with a
-per-segment pose pkl. Only steps 4–6 consume these files; steps 1–3 don't
-need them. CPU only, one process per scene.
+per-segment pose pkl, and two files the box-generation stage needs:
+`masked_points/NNNN.npy`, the rows of `NNNN.npy` whose lidar return projects
+into one of the five camera images (Waymo's per-return camera projection,
+first slot set; the label point counts are taken on this subset), and
+`<segment>_fov.pkl`, the per-frame OpenPCDet info records (frame id, context
+name and timestamp, camera image shapes, float32 ego pose, the GT boxes in
+front of the vehicle — centre x > 0 — and the masked per-lidar point counts);
+stage 2 of the box generation copies these records and replaces their
+`annos` with the pseudo labels. Steps 4–6 read only `NNNN.npy` and the pose
+pkl; steps 1–3 need nothing from here. CPU only, one process per scene.
 
 ```bash
 python waymo_processed_gen.py \
@@ -158,10 +172,11 @@ python waymo_processed_gen.py \
     --scene-start 0 --scene-end 797 --workers 16
 ```
 
-**Already ran OpenPCDet's `create_waymo_infos` (e.g. for training)?** Skip
-this step and point later steps at that root instead of `$OUT/processed` —
-its output is a drop-in replacement (`<segment>/NNNN.npy` is the same file,
-and its `<segment>.pkl` carries identical pose entries).
+**Already ran OpenPCDet's `create_waymo_infos` (e.g. for training)?** Steps
+4–6 can read that root instead of `$OUT/processed` (`<segment>/NNNN.npy` is
+the same file, and its `<segment>.pkl` carries identical pose entries), but
+the box-generation stage also needs `masked_points/` and `<segment>_fov.pkl`,
+which OpenPCDet does not write — so run this step anyway, into its own root.
 **If you run both, keep the two outputs in separate roots.** Both
 preprocessings write `<segment>/<segment>.pkl`, but OpenPCDet's pkl also
 carries the annotations and point counts training needs, while this script's
@@ -174,8 +189,11 @@ instead of silently destroying it.
 
 Parses every TFRecord frame and writes the per-scene tree all later steps
 share: the full point cloud (both lidar returns, all 5 lidars), its camera
-projections, per-camera point-index masks, GT boxes, ego poses, and the five
-camera JPEGs. CPU by default (`--device gpu` is faster but shifts point
+projections, per-camera point-index masks, GT boxes, ego poses, the five
+camera JPEGs, and each camera's calibration (`intrinsic/` — the waymo
+9-vector; `projection_mat/` — scene frame, i.e. the ego pose of frame 0, to
+that frame's camera: `inv(pose_f @ extrinsic) @ pose_0`). The box-generation
+stage consumes the calibration files for its 2D IoU vote. CPU by default (`--device gpu` is faster but shifts point
 coordinates by up to ~5 mm).
 
 ```bash
@@ -219,8 +237,10 @@ python merge_instances.py \
 done
 ```
 
-- **Input** — `$OUT/sam/scene-N/<CAM>/[<aug>/]visualization/uppc_*_sam`
-- **Output** — `$OUT/sam/scene-N/{merged_sam_pc,merged_sam_color}/<aug>/`, `conn_dict_<aug>.pkl`
+- **Input** — `$OUT/sam/scene-N/<CAM>/[<aug>/]visualization/uppc_*_sam` (+ step-2 `erosion/json_data` for the box aggregate)
+- **Output** — `$OUT/sam/scene-N/{merged_sam_pc,merged_sam_color}/<aug>/`, `conn_dict_<aug>.pkl`; the
+  `adaptive1200_30_50_10_2` run also writes `agg_mask.json` (per-frame 2D detection boxes keyed by
+  merged instance id — the box-generation stage reads it for the 2D IoU vote)
 
 ### 4. Context-aware refinement — `refine_sam_pcd.py`
 

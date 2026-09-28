@@ -33,6 +33,7 @@ SENSOR_HEIGHT_M = 1.7  # approximate lidar height above the ego origin
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser -> argparse.ArgumentParser."""
     parser = argparse.ArgumentParser(
         description="Fuse ppscore-static lidar points into a per-scene TSDF mesh.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -89,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_split(split_file: Path):
+    """Read a split file -> list of str segment names (extension stripped)."""
     with split_file.open("r") as stream:
         return [line.strip().split(".")[0] for line in stream if line.strip()]
 
@@ -96,6 +98,12 @@ def load_split(split_file: Path):
 def process_scene(
     scene_idx: int, segment_name: str, args: argparse.Namespace
 ) -> "tuple[int, int, int] | None":
+    """Fuse one scene's static points into a TSDF mesh and write the .bin pair.
+
+    scene_idx: int scene number; segment_name: str Waymo segment; args: parsed
+    CLI namespace -> (frames integrated, num vertices, num triangles), or None
+    when scene-<idx> does not exist under --scene-data-root.
+    """
     scene_dir = args.scene_data_root / f"scene-{scene_idx}"
     if not scene_dir.is_dir():
         return None
@@ -144,6 +152,7 @@ def process_scene(
 
 
 def main() -> None:
+    """CLI entry point: process scenes --scene-start..--scene-end sequentially."""
     args = build_parser().parse_args()
     segment_names = load_split(args.split_file)
 

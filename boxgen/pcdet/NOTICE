@@ -1,0 +1,8 @@
+This directory is a minimal subset of OpenPCDet
+(https://github.com/open-mmlab/OpenPCDet), Copyright (c) OpenPCDet contributors,
+licensed under the Apache License, Version 2.0 (see LICENSE in this directory).
+
+Files taken verbatim: ops/iou3d_nms/src/* (3D IoU and rotated NMS, written by
+Shaoshuai Shi), ops/roiaware_pool3d/src/*, ops/roiaware_pool3d/roiaware_pool3d_utils.py,
+utils/common_utils.py.  They are built by ../setup.py into the two CUDA
+extensions that the box-generation stage imports.

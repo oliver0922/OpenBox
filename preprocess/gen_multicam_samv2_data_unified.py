@@ -49,7 +49,11 @@ SAM2_CHECKPOINT_URL = 'https://dl.fbaipublicfiles.com/segment_anything_2/072824/
 
 
 def resolve_sam2_checkpoint(path):
-    """Return a local SAM2 checkpoint path; download the official file if it is missing."""
+    """Return a local SAM2 checkpoint path; download the official file if it is missing.
+
+    path: str file path or None (None -> <script dir>/checkpoints/sam2_hiera_large.pt)
+    -> str path to an existing checkpoint file.
+    """
     if path is None:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'checkpoints', 'sam2_hiera_large.pt')
@@ -61,6 +65,7 @@ def resolve_sam2_checkpoint(path):
 
 
 def parse_args():
+    """Parse the CLI arguments -> argparse.Namespace."""
     parser = ArgumentParser()
     parser.add_argument(
         'model',
@@ -102,6 +107,11 @@ image_predictor = None
 
 
 def init_worker(gpu_queue, num_workers):
+    """Pool initializer: pin this worker to one GPU and cap its CPU threads.
+
+    gpu_queue: multiprocessing.Queue of str GPU ids; num_workers: int pool
+    size -> None (sets CUDA_VISIBLE_DEVICES / thread counts as side effects).
+    """
     # each worker takes one GPU from the queue. CUDA_VISIBLE_DEVICES must be
     # set before the first CUDA call (torch is already imported, that is fine).
     gpu = gpu_queue.get()
@@ -115,6 +125,11 @@ def init_worker(gpu_queue, num_workers):
 
 
 def load_models(args):
+    """Build the SAM2 predictors and Grounding DINO inferencer once per worker.
+
+    args: parsed CLI namespace -> None (fills the module-level inferencer,
+    video_predictor and image_predictor globals).
+    """
     global inferencer, video_predictor, image_predictor
 
     if torch.cuda.get_device_properties(0).major >= 8:
@@ -133,6 +148,11 @@ def load_models(args):
 
 
 def process_scene(scene_idx, args):
+    """Run detection + SAM2 tracking + result drawing for one scene, all 5 cams.
+
+    scene_idx: int scene number; args: parsed CLI namespace -> None (writes
+    the per-scene output tree described in the module docstring).
+    """
     global inferencer
     if inferencer is None:
         load_models(args)
@@ -191,6 +211,7 @@ def process_scene(scene_idx, args):
 
 
 def main():
+    """CLI entry point: resolve checkpoints, then map scenes over a GPU pool."""
     args = parse_args()
     if args.weights is None:
         # one download in the parent, cached in ~/.cache/huggingface for the workers

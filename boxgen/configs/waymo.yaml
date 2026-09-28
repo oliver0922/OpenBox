@@ -1,0 +1,130 @@
+# OpenBox adaptive box generation - Waymo release configuration
+#
+# Every tunable of the three stages lives here; the scripts take it via --cfg.
+# Values are the ones that produced the released pseudo labels.  Distance
+# thresholds marked "squared" are compared against SQUARED L2 distances
+# (the original faiss IndexFlatL2 semantics): 0.15 means a radius of 0.387 m.
+
+data:
+  adaptive_name: adaptive1200_30_50_10_2   # refined_sam_pc/<adaptive_name> sub-folder of a scene
+  cameras:                                 # Waymo camera id -> name; the iteration order builds the
+    1: FRONT                               # per-frame camera dicts and must not change
+    2: FRONT_LEFT
+    3: FRONT_RIGHT
+    4: SIDE_LEFT
+    5: SIDE_RIGHT
+  camera_to_opencv:                        # homogeneous camera frame (Waymo: x fwd, y left, z up)
+    - [0, -1, 0, 0]                        # -> OpenCV camera frame (x right, y down, z fwd), applied
+    - [0, 0, -1, 0]                        # after projection_mat; identity for OpenCV-style calibrations
+    - [1, 0, 0, 0]
+    - [0, 0, 0, 1]
+  image_bounds:                            # camera name -> [min_u, min_v, max_u, max_v] pixels; the
+    FRONT: [0, 0, 1920, 1280]              # projected box corners of the 2D-mask vote are clipped to these
+    FRONT_LEFT: [0, 0, 1920, 1280]
+    FRONT_RIGHT: [0, 0, 1920, 1280]
+    SIDE_LEFT: [0, 0, 1920, 886]
+    SIDE_RIGHT: [0, 0, 1920, 886]
+  mesh_voxel_length: 0.15                  # static_vert{vl}_{tr}.bin / static_tri{vl}_{tr}.bin
+  mesh_truncation: 0.4
+  frame_start: 0                           # first frame index to load
+  frame_end: 200                           # last frame index to load (inclusive)
+  fov_half_angle_rad: 2.0                  # raw LiDAR is kept where |atan2(y, x)| < this
+
+classes:
+  # per-class mean box extent (l, w, h) in metres; drives the too-big / extension checks
+  statistical_box_size:
+    car:                  [4.619270266477996, 1.9605177054956888, 1.7351115509123118]
+    bus:                  [11.180964977588573, 2.9490561422168535, 3.495353338904443]
+    person:               [0.7256775142993839, 0.6675101669652802, 1.7683929307437072]
+    truck:                [6.885711474284342, 2.5098827027397594, 2.8263594451691283]
+    construction_vehicle: [6.479315517385073, 2.8200658717585685, 3.174820395230589]
+    trailer:              [12.283107917492162, 2.9222426452828945, 3.8657658567217736]
+    barrier:              [0.4946742555657957, 2.512045893121309, 0.988849618290125]
+    bicycle:              [1.6984274108461557, 0.6043978687486892, 1.2930665752268322]
+    motorcycle:           [2.1102513601741513, 0.7765604906518981, 1.4644224948065796]
+    traffic_cone:         [0.41421863237902157, 0.4087340035453244, 1.0768620723148907]
+  deformable: [person, bicycle]            # boxed per frame instead of aggregated
+  fine_to_coarse:                          # SAM prompt class -> Waymo class in the infos
+    car: Vehicle
+    truck: Vehicle
+    construction_vehicle: Vehicle
+    bus: Vehicle
+    trailer: Vehicle
+    motorcycle: Vehicle
+    person: Pedestrian
+    bicycle: Cyclist
+    traffic_cone: traffic_cone
+    barrier: barrier
+  tracked: [Vehicle, Cyclist, Pedestrian]  # stage-3 order; it decides track-id assignment
+
+static_dynamic_split:                      # per-frame split of SAM points (SceneLoader)
+  ppscore_static_threshold: 0.7            # LiDAR point is static if its ppscore >= this
+  sam_to_lidar_sq_threshold: 0.15          # squared; SAM point inherits the label of LiDAR within this
+  sam_removal_sq_threshold: 0.15           # squared; raw LiDAR within this of a SAM point is dropped
+
+sdf_filter:                                # surface-aware filtering of the aggregated static points
+  sam_to_surface_sq_threshold: 0.15        # squared; SAM point counts as on the mesh surface
+  sdf_vertex_radius: 0.15                  # Euclidean; nearest mesh vertex lookup in point_to_sdf
+  static_instance_min_fraction: 0.5        # instance stays static if MORE than this fraction of its points is on-surface (strict >)
+  vertex_vote_min_sam_fraction: 0.3        # vertex vote: min fraction of SAM points among its voters
+  max_cluster_vertex_dist: 0.1             # metres; vertex-to-cluster distance in max_cluster_filtering
+
+hdbscan:                                   # clustering of the aggregated static points
+  min_cluster_size: 30
+  min_samples: 15
+  leaf_size: 100
+
+deformable:                                # per-frame boxes of the deformable classes
+  hdbscan:
+    min_cluster_size: 3
+    min_samples: 1
+    cluster_selection_epsilon: 0.5
+  min_points_for_clustering: 10
+  min_points_for_box_fit: 3
+  outlier_neighbour_fraction: 2            # nb_neighbors = num_points // this
+  outlier_std_ratio: 2.0
+  too_big_ratio: 1.5
+
+single_frame:                              # per-frame boxes of non-aggregating instances
+  min_points: 20                           # instance points in the frame before a box is fitted
+  neighbour_frame_min_points: 20           # a neighbouring frame contributes a motion heading only if it has more than this many instance points
+  center_diff_threshold: 0.5               # metres of centroid shift that marks an instance as moving
+  too_big_ratio: 1.5                       # fitted dim > ratio * class prior -> instance dropped
+  fix_ratio: 1.2                           # max(l, w) > ratio * min(prior l, w) -> fitted yaw trusted
+
+multi_frame:                               # refinement of the aggregated static boxes
+  outlier_nb_neighbors: 20
+  outlier_std_ratio: 2.0
+  thres_parallel: 0.8                      # cal_surface: min dot(triangle normal, face axis)
+  thres_num_normal_vectors: 0              # cal_surface: votes a face must exceed to be visible
+  z_refine_threshold: 0.7                  # refine_z: skip ground snapping if h > ratio * class h
+
+box_fit:                                   # rectangle fits and ground snapping shared by every box stage (boxes.py)
+  closeness_yaw_step_deg: 0.1              # closeness_rectangle: yaw sweep step over [0, 90] degrees
+  closeness_min_edge_dist: 1.0e-2          # closeness_rectangle: lower clamp of the point-to-edge distance (m)
+  vertical_normal_max_abs_y: 0.5           # point_normal_rectangle: |normal_y| below this counts as a vertical surface
+  normal_hist_bin_deg: 2.5                 # point_normal_rectangle: bin width of the folded normal-direction histogram
+  normal_search_radius: 1.0                # make_box('point_normal'): open3d normal estimation radius (m) ...
+  normal_max_nn: 50                        #   ... and its neighbour cap
+  ground_quantile: 0.99                    # refine_z / refine_z_bbox / refine_z_deform: ground = z at this fraction of the descending z list
+  aspect_ratio_gate: 2.0                   # refine_bbox: l/w above this = elongated; a lone elongated candidate skips the 2D vote
+
+nms:                                       # per-class rotated-BEV NMS; the release run used different
+                                           # values in stage 1 and in tracking - keep both.
+  stage1:                                  # generate_boxes
+    bev_iou_threshold: 1.0e-9
+    pre_max_size: 300
+  tracking:                                # track_boxes
+    bev_iou_threshold: 0.0
+    pre_max_size: 300
+
+tracking:                                  # AB3DMOT (stage 3)
+  first_track_id: 1
+  kalman:
+    initial_covariance_scale: 10.0
+    velocity_initial_covariance_scale: 1000.0
+    velocity_process_noise_scale: 0.01
+  categories:                              # threshold: giou for giou_3d, centre distance (m) for dist_3d
+    Vehicle:    {algorithm: hungar, metric: giou_3d, threshold: -0.2, min_hits: 3, max_age: 5}
+    Pedestrian: {algorithm: greedy, metric: giou_3d, threshold: -0.4, min_hits: 1, max_age: 6}
+    Cyclist:    {algorithm: hungar, metric: dist_3d, threshold: 2,    min_hits: 3, max_age: 6}

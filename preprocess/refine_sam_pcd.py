@@ -43,6 +43,11 @@ warnings.filterwarnings("ignore")
 
 
 def load_pcd(args, scene_idx, frame_idx):
+    """Load one raw lidar frame for scene-N.
+
+    args: parsed CLI namespace; scene_idx: int; frame_idx: int
+    -> float32 (N, 3) xyz (first 3 columns of the processed .npy).
+    """
     seq_name_path = args.split_file
     if seq_name_path is None:
         seq_name_path = os.path.join(args.seq_data_dir, '../ImageSets_range/train.txt')
@@ -57,6 +62,10 @@ def load_pcd(args, scene_idx, frame_idx):
 
 
 def ground_plane_removal(args, full_pc):
+    """Remove ground with Patchwork++, then drop points at or below z_threshold.
+
+    full_pc: float32 (N, 3) xyz -> (M, 3) non-ground xyz above args.z_threshold.
+    """
     params = pypatchworkpp.Parameters()
     params.enable_RNR = False
     PatchworkPLUSPLUS = pypatchworkpp.patchworkpp(params)
@@ -68,6 +77,12 @@ def ground_plane_removal(args, full_pc):
 
 
 def load_instance_pcd(args, scene_idx, frame_idx):
+    """Load the merged SAM instance cloud of one frame, split per instance.
+
+    args: parsed CLI namespace; scene_idx/frame_idx: int
+    -> (list of float32 (M_i, 3) xyz per instance, float32 (K,) instance ids);
+    ([], []) when the frame's .bin is missing (points below z_threshold dropped).
+    """
     try:
         instance_pc_all = (np.fromfile(os.path.join(args.sam_data_dir, f'scene-{scene_idx}', 'merged_sam_pc', args.aug_name, f'{str(frame_idx).zfill(6)}.bin'), dtype=np.float32).reshape(-1, 4))
         # remove with z threshold
@@ -83,6 +98,12 @@ def load_instance_pcd(args, scene_idx, frame_idx):
 
 
 def match_segment_instances(args, segment_list, instance_pcd_list, instance_pcd_id_list):
+    """Match each geometric cluster to the first SAM instance it overlaps enough.
+
+    segment_list: list of (S_i, 3) cluster xyz; instance_pcd_list: list of
+    float32 (M_j, 3); instance_pcd_id_list: float32 (K,) ids
+    -> list of len(segment_list): matched instance id (float32) or -1 (int).
+    """
     segment_id_list = []
     for s_id, segment in enumerate(segment_list):
         for i_id, instance_pcd in zip(instance_pcd_id_list, instance_pcd_list):
@@ -98,6 +119,12 @@ def match_segment_instances(args, segment_list, instance_pcd_list, instance_pcd_
 
 
 def merge_segments_with_id(args, segment_id_list, segment_list):
+    """Append the matched id column to each matched cluster and stack them.
+
+    segment_id_list: list of ids (-1 = unmatched, dropped); segment_list: list
+    of (S_i, 3) xyz -> float64 (R, 4) x,y,z,instance_id; float64 (0,) when
+    nothing matched.
+    """
     refined_instace_pcd_with_id_list = []
     for i, segment_id in enumerate(segment_id_list):
         if segment_id == -1:
@@ -113,6 +140,11 @@ def merge_segments_with_id(args, segment_id_list, segment_list):
 
 
 def hdbscan_areas(args, pc):
+    """Cluster non-ground points with HDBSCAN and drop outliers/small clusters.
+
+    pc: (N, 3) xyz -> list of (S_i, 3) clusters, each with at least
+    args.min_segment_pc_size points (noise label -1 excluded).
+    """
     hdbscaner = HDBSCAN(algorithm='best', alpha=1., approx_min_span_tree=True,
                         gen_min_span_tree=True, leaf_size=100, metric='euclidean',
                         min_cluster_size=args.min_cluster_size,
@@ -132,6 +164,11 @@ def hdbscan_areas(args, pc):
 
 
 def scene_thing(args, scene_range):
+    """Refine every frame of the given scenes and write the (R, 4) .bin files.
+
+    args: parsed CLI namespace; scene_range: iterable of int scene indices
+    -> None. Frames whose raw .npy is missing are skipped.
+    """
     out_root = args.sam_data_dir if args.in_place else args.out_dir
     for scene_idx in scene_range:
         save_dir = os.path.join(out_root, f'scene-{scene_idx}', 'refined_sam_pc', args.aug_name)
@@ -161,6 +198,7 @@ def scene_thing(args, scene_range):
 
 
 def main(args):
+    """Split the scene range into contiguous batches, one process each. args: parsed CLI namespace -> None."""
     scene_list = range(args.scene_start, args.scene_end + 1)
 
     if args.num_workers <= 1:
